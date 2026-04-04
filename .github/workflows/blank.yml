@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  # ─── Job 1: Validação em Pull Requests (instância local) ───────────────────
+  validate:
+    name: Validate SQL Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase local instance
+        run: supabase start
+
+      - name: Validate migrations (db reset)
+        run: supabase db reset
+
+      - name: Verify TypeScript types are up-to-date
+        run: |
+          supabase gen types typescript --local > types_generated.ts
+          if [ "$(git diff --ignore-space-at-eol types_generated.ts | wc -l)" -gt "0" ]; then
+            echo "❌ Os tipos gerados estão desatualizados. Rode 'supabase gen types' localmente e faça commit."
+            git diff types_generated.ts
+            exit 1
+          fi
+          echo "✅ Tipos TypeScript validados."
+
+      - name: Stop Supabase local instance
+        if: always()
+        run: supabase stop
+
+  # ─── Job 2: Deploy para staging e produção ─────────────────────────────────
+  deploy:
+    name: Deploy Migrations
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: validate  # Só roda se o job de validação passar
+
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Definir banco de destino conforme branch
+        run: |
+          if [ "$GITHUB_REF" == "refs/heads/main" ]; then
+            echo "SUPABASE_DB_URL=${{ secrets.SUPABASE_DB_URL }}" >> $GITHUB_ENV
+            echo "ENVIRONMENT=production" >> $GITHUB_ENV
+          else
+            echo "SUPABASE_DB_URL=${{ secrets.SUPABASE_DB_URL_STAGING }}" >> $GITHUB_ENV
+            echo "ENVIRONMENT=staging" >> $GITHUB_ENV
+          fi
+
+      - name: Aplicar migrations no ambiente
+        run: |
+          echo "🚀 Aplicando migrations em: $ENVIRONMENT"
+          supabase db push --db-url "$SUPABASE_DB_URL"
+
+      - name: Confirmar deploy concluído
+        run: echo "✅ Deploy concluído em $ENVIRONMENT"
