@@ -12,7 +12,10 @@ Configurações já realizadas no Supabase:
 - ✅ Extensão **pgvector** ativada (embeddings RAG)
 - ✅ Extensão **PostGIS** ativada (dados geoespaciais)
 - ✅ Extensão **pg_cron** ativada (agendamento de jobs)
-- ⏳ **RLS** (Row Level Security) — pendente de configuração
+- ✅ Tabelas raw criadas e validadas (`001_raw_tables.sql`)
+- ✅ Índices em `coletado_em` criados (`002_idx_coletado_em.sql`)
+- ✅ TOAST validado em todas as tabelas raw (`toast_tuple_target=128`)
+- ✅ RLS configurado em todas as tabelas raw
 - ⏳ **GitHub Secrets** — pendente de configuração
 - ⏳ **Supabase CLI** — pendente de vinculação
 
@@ -173,10 +176,19 @@ WHERE name IN ('vector', 'postgis')
 ORDER BY name;
 ```
 
+### Migrations aplicadas
+
+| Arquivo | Descrição | Status |
+|---|---|---|
+| `001_raw_tables.sql` | Tabelas raw de armazenamento bruto | ✅ Aplicada |
+| `002_idx_coletado_em.sql` | Índices em `coletado_em` para consultas por período | ✅ Aplicada |
+
 ### Convenções de migration
 
-- Arquivos nomeados com timestamp: `YYYYMMDD_descricao.sql`
+- Arquivos nomeados com número sequencial: `NNN_descricao.sql`
 - Sempre incluir `-- migrate:up` e `-- migrate:down`
+- Usar `DROP POLICY IF EXISTS` antes de `CREATE POLICY` para evitar conflitos
+- Executar **apenas o bloco `migrate:up`** no SQL Editor (não executar o `migrate:down`)
 - Executar via Supabase CLI:
 
 ```bash
@@ -213,15 +225,62 @@ SELECT cron.schedule(
 
 ### Row Level Security (RLS)
 
-⏳ **PENDENTE** — Todas as tabelas com dados sensíveis devem ter RLS habilitado. As policies ficam versionadas em `infra/supabase/schemas/`.
+✅ **Configurado** em todas as tabelas raw. Padrão aplicado:
+
+- **Leitura pública** (`anon` + `authenticated`): `SELECT` liberado para todos
+- **Escrita restrita** (`service_role`): `INSERT`/`ALL` apenas para scrapers via `SUPABASE_SERVICE_KEY`
 
 ```sql
--- Habilitar RLS em uma tabela
-ALTER TABLE nome_da_tabela ENABLE ROW LEVEL SECURITY;
+-- Padrão aplicado em todas as tabelas raw
+ALTER TABLE nome_tabela ENABLE ROW LEVEL SECURITY;
 
--- Exemplo de policy de leitura pública
-CREATE POLICY "acesso_publico" ON licitacoes
-  FOR SELECT USING (true);
+DROP POLICY IF EXISTS "leitura_publica"      ON nome_tabela;
+DROP POLICY IF EXISTS "escrita_service_role" ON nome_tabela;
+
+CREATE POLICY "leitura_publica"      ON nome_tabela FOR SELECT USING (true);
+CREATE POLICY "escrita_service_role" ON nome_tabela FOR INSERT WITH CHECK (auth.role() = 'service_role');
+```
+
+### Tabelas raw criadas
+
+| Tabela | Colunas | Fonte | TOAST | RLS | Status |
+|---|---|---|---|---|---|
+| `raw_contratos` | 4 | Portal de Transparência, TCE-RJ | ✅ | ✅ | ✅ Criada |
+| `raw_geodados` | 4 | IBGE | ✅ | ✅ | ✅ Criada |
+| `raw_coleta_log` | 12 | — (log interno) | ✅ | ✅ | ✅ Criada |
+| `coleta_cache` | 5 | — (cache interno) | ✅ | ✅ | ✅ Criada |
+
+**Padrão aplicado em todas as tabelas:**
+- `id BIGSERIAL PRIMARY KEY`
+- `fonte TEXT NOT NULL` — origem do dado
+- `payload JSONB NOT NULL` — dado bruto completo
+- `coletado_em TIMESTAMPTZ DEFAULT NOW()` — timestamp de coleta
+- `toast_tuple_target = 128` — PAGE Compression ativa
+- Índices em `fonte`, `coletado_em DESC` e `payload` (GIN)
+
+### Validar TOAST nas tabelas raw
+
+```sql
+SELECT
+    relname                AS tabela,
+    reloptions             AS opcoes_storage,
+    reltoastrelid != 0     AS toast_ativo
+FROM pg_class
+WHERE relname IN ('raw_contratos', 'raw_geodados', 'raw_coleta_log', 'coleta_cache');
+```
+
+### Verificar índices criados
+
+```sql
+SELECT tablename, indexname, indexdef
+FROM pg_indexes
+WHERE indexname IN (
+    'idx_raw_contratos_coletado_em',
+    'idx_raw_geodados_coletado_em',
+    'idx_raw_coleta_log_coletado_em',
+    'idx_coleta_cache_coletado_em'
+)
+ORDER BY tablename;
 ```
 
 ---
